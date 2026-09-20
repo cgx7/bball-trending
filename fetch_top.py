@@ -185,7 +185,17 @@ def _ytdlp_jsonlines(extra_args, timeout=420, quiet=False):
             out.append(json.loads(line))
         except json.JSONDecodeError:
             continue
-    return out
+
+    # yt-dlp 有时会吐一个含 entries 的播放列表对象,而不是逐条输出。
+    # 不摊平的话,整个搜索结果会被当成「一个视频」,后面全部对不上号。
+    flat = []
+    for obj in out:
+        entries = obj.get("entries")
+        if isinstance(entries, list):
+            flat.extend(e for e in entries if isinstance(e, dict))
+        else:
+            flat.append(obj)
+    return flat
 
 
 def search_keyword(keyword, depth):

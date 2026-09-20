@@ -1,1 +1,5 @@
+# 采集榜单用:直接请求 YouTube 搜索结果页并解析 ytInitialData
+requests>=2.31
+
+# 下载视频用(只有 download.py / 下载工作流需要)
 yt-dlp>=2026.8.19

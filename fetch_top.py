@@ -5,9 +5,16 @@
 ================
 抓取 YouTube 上最近 24 小时内发布、播放量最高的篮球视频,输出每日榜单。
 
-为什么用 yt-dlp 而不是 YouTube Data API:
+为什么不用 YouTube Data API:
   1. 不需要 API key(在大陆办 Google Cloud 账号本身就是个坎)
-  2. 数据中心 IP(如 GitHub Actions)走 API 容易被判机器人;yt-dlp 久经考验
+  2. 数据中心 IP(如 GitHub Actions)走 API 容易被判机器人
+
+为什么直接解析搜索结果页,而不是用 yt-dlp 逐条取视频详情:
+  实测在 GitHub Actions 的机房 IP 上,搜索接口放行,但逐个请求
+  watch?v= 会被 "Sign in to confirm you're not a bot" 全部挡死,
+  换 player_client 也绕不过。而搜索结果页本身就带播放量/发布时间/时长,
+  解析它等于一次请求拿全所有字段,既绕开反爬又比逐条请求快一个数量级。
+  详见下面「采集核心」段的注释。
 
 为什么自己在本地排序,而不是让 YouTube 按播放量排:
   YouTube 的 sp 过滤参数是 base64 编码的 protobuf,写死会随官方改动失效。
@@ -28,11 +35,12 @@ import argparse
 import json
 import logging
 import re
-import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import requests
 
 # Windows 控制台默认 GBK,强制 UTF-8 输出,避免中文乱码
 for _s in (sys.stdout, sys.stderr):
@@ -120,6 +128,18 @@ def _fmt_age(hours):
     return f"{hours / 24:.1f} 天前"
 
 
+def _duration_text(rec):
+    """时长显示。搜索页直接给 '3:24' 字符串,自检样例给的是秒数。"""
+    return rec.get("duration_text") or _fmt_duration(rec.get("duration"))
+
+
+def _published_at(rec, generated_at):
+    """估算发布时间。搜索页只给「N 小时前」,从生成时刻倒推。"""
+    if rec.get("_pub"):
+        return rec["_pub"]
+    return generated_at - timedelta(hours=rec.get("_age_hours") or 0)
+
+
 def _risk_of(channel):
     """按频道名粗判版权风险。官方版权方的素材二次加工风险最高。"""
     if channel and _OFFICIAL_RE.search(channel):
@@ -141,167 +161,226 @@ def diag(msg):
     DIAG.append(str(msg))
 
 
-# YouTube 对数据中心 IP(GitHub Actions 就是)有反爬。不同 player client
-# 走的接口不一样,一个被挡换下一个。默认排最前,其余作为退路依次尝试。
-CLIENT_VARIANTS = [
-    None,
-    "youtube:player_client=web_safari",
-    "youtube:player_client=tv_embedded",
-    "youtube:player_client=mweb",
-    "youtube:player_client=android",
-]
+# 抓搜索结果页用的请求头。带 Accept-Language 是为了让 YouTube 返回英文页面,
+# 这样相对时间就是 "3 hours ago",好解析。
+HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 
 # ------------------------------- 采集核心 -------------------------------
+#
+# 这里为什么不用 yt-dlp 取视频详情(踩过的坑,别再改回去):
+#
+#   阶段1 搜索:原始 480 条          ← 搜索能过
+#   阶段2 去重去噪后:421 条          ← 数据没问题
+#   ERROR: [youtube] xxx: Sign in to confirm you're not a bot.   ← 全挂
+#   阶段3 补全精确数据:0/40 条
+#
+# GitHub Actions 的机房 IP 上,YouTube 的搜索接口放行,但逐个取 watch?v= 详情
+# 会被反爬全部挡死,换 player_client(web_safari/tv_embedded/mweb/android)也没用。
+#
+# 但搜索结果页本身就已经带着播放量、发布时间、时长 —— 直接解析它,
+# 一次请求拿全所有字段,既绕开被封的接口,又比逐条请求快一个数量级。
 
-def _ytdlp_jsonlines(extra_args, timeout=420, quiet=False):
-    """跑一次 yt-dlp,把逐行 JSON 解析成 dict 列表。失败返回空列表。"""
-    cmd = [
-        sys.executable, "-m", "yt_dlp",
-        "--dump-json", "--no-warnings", "--ignore-errors", "--no-progress",
-        "--socket-timeout", "20", "--retries", "3",
-    ] + extra_args
-    log.debug("yt-dlp: %s", " ".join(extra_args))
-    try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        diag(f"yt-dlp 超时({timeout}s): {' '.join(extra_args[:2])}")
-        return []
-    if proc.returncode != 0 and not proc.stdout.strip():
-        err = (proc.stderr or "").strip()
-        if not quiet:
-            diag(f"yt-dlp 失败 rc={proc.returncode}: {err[-400:]}")
-        return []
+def _extract_json_blob(html, marker):
+    """从 HTML 里抠出 marker 后面那坨 JSON(如 ytInitialData)。
 
-    out = []
-    for line in proc.stdout.splitlines():
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
-        try:
-            out.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-
-    # yt-dlp 有时会吐一个含 entries 的播放列表对象,而不是逐条输出。
-    # 不摊平的话,整个搜索结果会被当成「一个视频」,后面全部对不上号。
-    flat = []
-    for obj in out:
-        entries = obj.get("entries")
-        if isinstance(entries, list):
-            flat.extend(e for e in entries if isinstance(e, dict))
-        else:
-            flat.append(obj)
-    return flat
-
-
-def search_keyword(keyword, depth):
-    """扁平搜索一个关键词。依次尝试各个 player client,直到有一个返回结果。
-
-    为什么要循环试:YouTube 对数据中心 IP 会返回「确认你不是机器人」页面,
-    而不同 client 走的后端接口不同,往往只有部分被挡。
+    用花括号配对而不是正则:ytInitialData 嵌套很深,且视频标题里可能出现
+    '}' 或 '};',正则会提前截断。这里按字符串状态逐字符配对,才稳。
     """
-    for variant in CLIENT_VARIANTS:
-        args = ["--flat-playlist"]
-        if variant:
-            args += ["--extractor-args", variant]
-        args.append(f"ytsearch{depth}:{keyword}")
-
-        items = _ytdlp_jsonlines(args, quiet=(variant is not None))
-        if items:
-            if variant:
-                diag(f"关键词「{keyword}」用 {variant} 才成功(默认 client 被挡)")
-            log.info("  关键词 %-28s → %d 条", keyword, len(items))
-            return items
-    diag(f"关键词「{keyword}」在所有 client 下都返回空")
-    return []
-
-
-def enrich(video_id):
-    """补全单条视频的精确元数据(播放量/发布时间/时长)。"""
-    for variant in CLIENT_VARIANTS:
-        args = []
-        if variant:
-            args += ["--extractor-args", variant]
-        args.append(f"https://www.youtube.com/watch?v={video_id}")
-        items = _ytdlp_jsonlines(args, timeout=120, quiet=(variant is not None))
-        if items:
-            return items[0]
+    i = html.find(marker)
+    if i < 0:
+        return None
+    i = html.find("{", i)
+    if i < 0:
+        return None
+    depth, in_str, esc = 0, False, False
+    for j in range(i, len(html)):
+        c = html[j]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(html[i:j + 1])
+                except json.JSONDecodeError:
+                    return None
     return None
 
 
+def _walk_find(node, target, out):
+    """递归收集所有名为 target 的键对应的值。
+
+    不写死 contents.twoColumnSearchResultsRenderer.… 这条路径:
+    YouTube 改版频繁,路径会变,但 videoRenderer 这个键名很稳定。
+    """
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k == target:
+                out.append(v)
+            else:
+                _walk_find(v, target, out)
+    elif isinstance(node, list):
+        for item in node:
+            _walk_find(item, target, out)
+
+
+def _text_of(node):
+    """从 {'simpleText': ...} 或 {'runs': [{'text': ...}]} 里取纯文本。"""
+    if not isinstance(node, dict):
+        return ""
+    if "simpleText" in node:
+        return node["simpleText"] or ""
+    runs = node.get("runs")
+    if isinstance(runs, list):
+        return "".join(r.get("text", "") for r in runs if isinstance(r, dict))
+    return ""
+
+
+_REL_TIME_RE = re.compile(
+    r"(\d+)\s*(second|minute|hour|day|week|month|year)s?\s*ago", re.I
+)
+_UNIT_HOURS = {
+    "second": 1 / 3600, "minute": 1 / 60, "hour": 1,
+    "day": 24, "week": 24 * 7, "month": 24 * 30, "year": 24 * 365,
+}
+
+
+def _parse_relative_age(text):
+    """'3 hours ago' / 'Streamed 47 minutes ago' → 小时数(浮点)。
+
+    YouTube 搜索结果页只给相对时间,不给时间戳。对「最近 24 小时」这个
+    粒度来说完全够用 —— 没必要为了一个精确到秒的值去撞反爬。
+    """
+    if not text:
+        return None
+    m = _REL_TIME_RE.search(text)
+    if not m:
+        return None
+    return int(m.group(1)) * _UNIT_HOURS[m.group(2).lower()]
+
+
+def _new_session():
+    """带 CONSENT cookie 的会话,跳过欧盟那种同意跳转页。"""
+    s = requests.Session()
+    s.headers.update(HEADERS)
+    s.cookies.set("CONSENT", "YES+cb.20210328-17-p0.en+FX+000", domain=".youtube.com")
+    return s
+
+
+def search_page(keyword, session=None):
+    """抓一个关键词的搜索结果页,从 ytInitialData 里解析出视频列表。"""
+    sess = session or _new_session()
+    try:
+        r = sess.get(
+            "https://www.youtube.com/results",
+            params={"search_query": keyword, "hl": "en", "gl": "US"},
+            timeout=25,
+        )
+        r.raise_for_status()
+    except Exception as e:
+        diag(f"关键词「{keyword}」请求失败:{type(e).__name__}: {e}")
+        return []
+
+    data = _extract_json_blob(r.text, "ytInitialData")
+    if data is None:
+        diag(f"关键词「{keyword}」:页面里找不到 ytInitialData"
+             f"(HTML 长度 {len(r.text)},多半是被反爬挡了或官方改版)")
+        return []
+
+    renderers = []
+    _walk_find(data, "videoRenderer", renderers)
+    if not renderers:
+        diag(f"关键词「{keyword}」:ytInitialData 里没有 videoRenderer(可能改版)")
+        return []
+
+    out, no_views, no_time = [], 0, 0
+    for vr in renderers:
+        vid = vr.get("videoId")
+        if not vid:
+            continue
+        # viewCountText 是精确值("1,234,567 views"),
+        # shortViewCountText 是缩写("1.2M views")。优先用精确的。
+        views = (_parse_count(_text_of(vr.get("viewCountText")))
+                 or _parse_count(_text_of(vr.get("shortViewCountText"))))
+        age = _parse_relative_age(_text_of(vr.get("publishedTimeText")))
+        if views is None:
+            no_views += 1
+        if age is None:
+            no_time += 1
+        out.append({
+            "id": vid,
+            "title": _text_of(vr.get("title")),
+            "channel": (_text_of(vr.get("ownerText"))
+                        or _text_of(vr.get("longBylineText"))),
+            "view_count": views,
+            "age_hours": age,
+            "duration_text": _text_of(vr.get("lengthText")),
+            "url": f"https://www.youtube.com/watch?v={vid}",
+        })
+
+    log.info("  关键词 %-28s → %d 条(缺播放量 %d,缺时间 %d)",
+             keyword, len(out), no_views, no_time)
+    return out
+
+
 def collect(cfg):
-    """主流程:多关键词搜索 → 去重 → 补全 → 时间窗过滤 → 按播放量排序。"""
+    """主流程:多关键词抓搜索页 → 去重去噪 → 时间窗过滤 → 按播放量排序。"""
     DIAG.clear()
-    # 1. 多关键词并行搜索
-    log.info("搜索 %d 个关键词,每个取 %d 条 …", len(cfg["keywords"]), cfg["depth"])
+    log.info("搜索 %d 个关键词 …", len(cfg["keywords"]))
     raw = []
     with ThreadPoolExecutor(max_workers=4) as ex:
-        futs = {ex.submit(search_keyword, kw, cfg["depth"]): kw for kw in cfg["keywords"]}
+        futs = {ex.submit(search_page, kw): kw for kw in cfg["keywords"]}
         for f in as_completed(futs):
             raw.extend(f.result())
     diag(f"阶段1 搜索:原始 {len(raw)} 条")
 
-    # 2. 按 video id 去重,顺手做一次播放量粗排
+    # 2. 按 video id 去重 + 标题去噪
     seen, candidates = set(), []
     for it in raw:
         vid = it.get("id")
         if not vid or vid in seen:
             continue
         seen.add(vid)
-        title = it.get("title") or ""
-        if NOISE_RE.search(title):
+        if NOISE_RE.search(it.get("title") or ""):
             continue
         candidates.append(it)
-    log.info("去重后 %d 条候选", len(candidates))
     diag(f"阶段2 去重去噪后:{len(candidates)} 条")
 
-    # 3. 扁平搜索的播放量/时间不可靠,对头部候选补全精确元数据
-    candidates.sort(key=lambda x: _parse_count(x.get("view_count")) or 0, reverse=True)
-    head = candidates[: cfg["enrich"]]
-    log.info("对播放量最高的 %d 条补全精确数据(约 %d 秒)…", len(head), len(head) * 3)
-
-    detailed = []
-    with ThreadPoolExecutor(max_workers=5) as ex:
-        futs = {ex.submit(enrich, it["id"]): it for it in head}
-        for f in as_completed(futs):
-            d = f.result()
-            if d:
-                detailed.append(d)
-    log.info("补全成功 %d 条", len(detailed))
-    diag(f"阶段3 补全精确数据:{len(detailed)}/{len(head)} 条")
-
-    # 4. 发布时间窗口过滤
-    now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(hours=cfg["window"])
+    # 3. 时间窗 + 播放量过滤
+    no_time = no_views = 0
     kept = []
-    for d in detailed:
-        ts = d.get("timestamp")
-        if ts:
-            pub = datetime.fromtimestamp(ts, tz=timezone.utc)
-        else:
-            ud = d.get("upload_date")  # 'YYYYMMDD'
-            if not ud:
-                continue
-            pub = datetime.strptime(ud, "%Y%m%d").replace(tzinfo=timezone.utc)
-        if pub < cutoff:
+    for it in candidates:
+        age = it.get("age_hours")
+        if age is None:
+            no_time += 1
             continue
-        views = d.get("view_count")
+        if age > cfg["window"]:
+            continue
+        views = it.get("view_count")
         if not views:
+            no_views += 1
             continue
-        age_h = max((now - pub).total_seconds() / 3600, 0.05)
-        d["_pub"] = pub
-        d["_age_hours"] = age_h
-        d["_velocity"] = views / age_h  # 播放量/小时,衡量"正在爆"的程度
-        kept.append(d)
+        it["_age_hours"] = age
+        it["_velocity"] = views / max(age, 0.05)  # 播放量/小时,衡量"正在爆"
+        kept.append(it)
+    diag(f"阶段3 时间窗 {cfg['window']:.0f}h 内:{len(kept)} 条"
+         f"(因无发布时间剔除 {no_time} 条、无播放量剔除 {no_views} 条)")
 
-    log.info("时间窗内(%.0f 小时)有 %d 条", cfg["window"], len(kept))
-    diag(f"阶段4 时间窗 {cfg['window']:.0f}h 内:{len(kept)} 条")
-
-    # 5. 按播放量排序(用户要的是"播放量前五")
+    # 4. 按播放量排序(用户要的是"播放量前五")
     kept.sort(key=lambda x: x["view_count"], reverse=True)
     return kept
 
@@ -337,9 +416,10 @@ def render_markdown(rows, cfg, generated_at):
             "",
             "| 停在哪 | 说明 |",
             "|---|---|",
-            "| 阶段1 = 0 条 | YouTube 把 GitHub 的服务器 IP 挡了(反爬),或网络不通 |",
-            "| 阶段1 有数、阶段3 = 0 | 搜索能通但取视频详情被挡 |",
-            "| 阶段4 = 0 | 前面都正常,只是这个时间窗内确实没有新视频(放宽 `--window`) |",
+            "| 阶段1 = 0 条 | 搜索结果页请求失败/被反爬挡了,或网络不通 |",
+            "| 阶段1 有数、阶段2 ≈ 0 | 标题去噪把结果全滤掉了(NOISE_RE 太激进) |",
+            "| 阶段3 = 0 条 | 前面都正常,只是这个时间窗内确实没有新视频(放宽 `--window`) |",
+            "| 大量「缺播放量/缺时间」 | YouTube 改版了搜索结果页的字段名,需要更新解析 |",
             "| 一条诊断都没有 | 脚本没执行到采集,是环境/依赖问题 |",
             "",
         ]
@@ -355,7 +435,7 @@ def render_markdown(rows, cfg, generated_at):
             f"- 📺 **频道**:{r.get('channel') or r.get('uploader') or '—'}",
             f"- 👁 **播放量**:{_fmt_count(r['view_count'])}",
             f"- ⚡ **热度**:{_fmt_count(int(r['_velocity']))} 次/小时",
-            f"- ⏱ **时长**:{_fmt_duration(r.get('duration'))}",
+            f"- ⏱ **时长**:{_duration_text(r)}",
             f"- 🕐 **发布**:{_fmt_age(r['_age_hours'])}",
             f"- 🔗 **链接**:https://youtu.be/{vid}",
             f"- ⚖️ **版权风险**:{risk} —— {risk_note}",
@@ -374,7 +454,7 @@ def render_markdown(rows, cfg, generated_at):
             chan = (r.get("channel") or r.get("uploader") or "—").replace("|", "丨")[:20]
             lines.append(
                 f"| {i} | {title} | {chan} | {_fmt_count(r['view_count'])} | "
-                f"{_fmt_count(int(r['_velocity']))} | {_fmt_duration(r.get('duration'))} | "
+                f"{_fmt_count(int(r['_velocity']))} | {_duration_text(r)} | "
                 f"{_fmt_age(r['_age_hours'])} | [看](https://youtu.be/{r['id']}) |"
             )
         lines.append("")
@@ -417,10 +497,12 @@ def render_json(rows, cfg, generated_at):
                 "url": f"https://youtu.be/{r['id']}",
                 "view_count": r["view_count"],
                 "views_per_hour": int(r["_velocity"]),
-                "duration": r.get("duration"),
-                "published": r["_pub"].isoformat(),
+                "duration": _duration_text(r),
+                "published": _published_at(r, generated_at).isoformat(),
                 "age_hours": round(r["_age_hours"], 2),
-                "thumbnail": r.get("thumbnail"),
+                # 搜索页不给缩略图 URL,但 YouTube 的缩略图地址是有规律的,拼就是了
+                "thumbnail": (r.get("thumbnail")
+                              or f"https://i.ytimg.com/vi/{r['id']}/hqdefault.jpg"),
                 "risk": _risk_of(r.get("channel") or r.get("uploader"))[0],
             }
             for i, r in enumerate(top, 1)
@@ -439,26 +521,122 @@ SELFTEST_ROWS = [
 ]
 
 
+def _fake_search_html():
+    """伪造一份搜索结果页,结构照着 YouTube 真实的 ytInitialData 来。
+
+    为什么要伪造:开发机在大陆连不上 YouTube,而解析代码是整条链路上最
+    容易出错的地方(字段名、嵌套层级、转义)。这里用假数据把解析逻辑
+    钉死,联网那部分交给 Actions 去验证。
+
+    故意埋的坑:标题里带 '}' 和 '";' —— 正则抠 JSON 会在这里截断,
+    花括号配对法必须扛住。
+    """
+    def vr(vid, title, chan, views, short_views, age, length):
+        return {
+            "videoRenderer": {
+                "videoId": vid,
+                "title": {"runs": [{"text": title}]},
+                "ownerText": {"runs": [{"text": chan, "navigationEndpoint": {}}]},
+                "viewCountText": {"simpleText": views} if views else {},
+                "shortViewCountText": {"simpleText": short_views} if short_views else {},
+                "publishedTimeText": {"simpleText": age} if age else {},
+                "lengthText": {"simpleText": length},
+                "thumbnail": {"thumbnails": [{"url": f"https://i.ytimg.com/vi/{vid}/hq.jpg"}]},
+            }
+        }
+
+    data = {
+        "contents": {"twoColumnSearchResultsRenderer": {"primaryContents": {
+            "sectionListRenderer": {"contents": [
+                {"itemSectionRenderer": {"contents": [
+                    vr("vid001", "Lakers vs Celtics | FULL Highlights };\" weird",
+                       "NBA", "1,820,000 views", "1.8M views", "4 hours ago", "9:12"),
+                    vr("vid002", "INSANE Streetball Dunk Compilation",
+                       "Ballislife", "940,000 views", "940K views", "7 hours ago", "7:01"),
+                    vr("vid003", "Best NBA Plays of the Night",
+                       "House of Highlights", "610,000 views", "610K views",
+                       "Streamed 11 hours ago", "5:58"),
+                    # 老视频 → 应被 24h 窗口挡掉
+                    vr("vid004", "2016 Finals Game 7 Full Game",
+                       "NBA", "48,000,000 views", "48M views", "3 years ago", "2:11:04"),
+                    # 缺播放量 → 应被剔除且计入诊断
+                    vr("vid005", "Unknown Upload", "Some Chan", "", "", "2 hours ago", "1:00"),
+                    # 缺发布时间 → 应被剔除且计入诊断
+                    vr("vid006", "No Timestamp Here", "Some Chan",
+                       "5,000 views", "5K views", "", "0:44"),
+                ]}},
+                {"continuationItemRenderer": {"trigger": "CONTINUATION_TRIGGER_ON_ITEM_SHOWN"}},
+            ]}
+        }}}
+    }
+    return ("<html><script>var ytInitialData = "
+            + json.dumps(data, ensure_ascii=False)
+            + ";</script></html>")
+
+
 def selftest():
-    """不联网跑一遍渲染,验证 markdown/json 输出与风险判定是否正确。"""
+    """不联网跑一遍解析 + 渲染,验证整条链路。"""
     now = datetime.now(timezone.utc)
-    rows = []
-    for vid, title, chan, views, age, dur in SELFTEST_ROWS:
-        rows.append({
-            "id": vid, "title": title, "channel": chan, "view_count": views,
-            "duration": dur, "_age_hours": age, "_velocity": views / age,
-            "_pub": now - timedelta(hours=age),
-            "thumbnail": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
-        })
-    rows.sort(key=lambda x: x["view_count"], reverse=True)
-    cfg = {"keywords": DEFAULT_KEYWORDS, "window": 24, "top": 5, "table": 20, "depth": 0, "enrich": 0}
-    md = render_markdown(rows, cfg, now)
+
+    # ---- 1. 解析:伪造搜索结果页,走一遍真实的解析代码 ----
+    html = _fake_search_html()
+    assert _extract_json_blob(html, "ytInitialData") is not None, \
+        "花括号配对法没能从 HTML 里抠出 ytInitialData"
+
+    # 直接复用 search_page 的解析分支(不联网:传一个假的 session)
+    class _FakeResp:
+        text = html
+        def raise_for_status(self):
+            pass
+
+    class _FakeSession:
+        def get(self, *a, **kw):
+            return _FakeResp()
+
+    parsed = search_page("dummy", session=_FakeSession())
+    by_id = {p["id"]: p for p in parsed}
+    assert len(parsed) == 6, f"应解析出 6 条,实际 {len(parsed)}"
+    assert by_id["vid001"]["title"].endswith('};" weird'), "标题里的 } 和 \"; 被截断了"
+    assert by_id["vid001"]["view_count"] == 1_820_000, "精确播放量解析错"
+    assert by_id["vid001"]["channel"] == "NBA", "频道名解析错"
+    assert abs(by_id["vid002"]["age_hours"] - 7) < 0.01, "相对时间解析错"
+    assert abs(by_id["vid003"]["age_hours"] - 11) < 0.01, "'Streamed 11 hours ago' 解析错"
+    assert abs(by_id["vid004"]["age_hours"] - 24 * 365 * 3) < 1, "'3 years ago' 解析错"
+    assert by_id["vid005"]["view_count"] is None and by_id["vid005"]["age_hours"] == 2
+    assert by_id["vid006"]["view_count"] == 5_000 and by_id["vid006"]["age_hours"] is None
+
+    # 只有短播放量时,退回到 shortViewCountText
+    assert _parse_count("1.2M views") == 1_200_000
+    assert _parse_count("2,345,678 views") == 2_345_678
+    print(f"[selftest] 解析通过 ✅  6 条里 4 条字段完整、2 条各缺一项(符合预期)")
+
+    # ---- 2. 过滤 + 排序:用解析结果跑一遍,应当只剩 3 条 ----
+    cfg = {"keywords": DEFAULT_KEYWORDS, "window": 24, "top": 5, "table": 20}
+    candidates = [p for p in parsed if not NOISE_RE.search(p["title"])]
+    kept = []
+    for it in candidates:
+        if it["age_hours"] is None or it["age_hours"] > cfg["window"] or not it["view_count"]:
+            continue
+        it["_age_hours"] = it["age_hours"]
+        it["_velocity"] = it["view_count"] / max(it["age_hours"], 0.05)
+        kept.append(it)
+    kept.sort(key=lambda x: x["view_count"], reverse=True)
+    assert [k["id"] for k in kept] == ["vid001", "vid002", "vid003"], \
+        f"过滤/排序错:拿到 {[k['id'] for k in kept]}"
+    print("[selftest] 过滤排序通过 ✅  4 年前的、缺播放量的、缺时间的都被正确剔除")
+
+    # ---- 3. 渲染 ----
+    md = render_markdown(kept, cfg, now)
+    print()
     print(md)
     print("=" * 60)
-    print(json.dumps(render_json(rows, cfg, now), ensure_ascii=False, indent=2)[:900])
-    assert "NBA" in md and "Top 5" in md, "渲染异常"
-    assert json.loads(json.dumps(render_json(rows, cfg, now)))["top"][0]["rank"] == 1
-    print("\n[selftest] 渲染与序列化检查通过 ✅")
+    js = render_json(kept, cfg, now)
+    print(json.dumps(js, ensure_ascii=False, indent=2)[:700])
+    assert "Top 3" in md, "渲染异常"
+    assert js["top"][0]["rank"] == 1 and js["top"][0]["published"], "JSON 序列化异常"
+    assert js["top"][1]["thumbnail"].startswith("https://i.ytimg.com/vi/vid002/"), "缩略图拼接错"
+    print("\n[selftest] 渲染与序列化通过 ✅")
+    print("\n全部自检通过 —— 解析、过滤、排序、渲染四段都正常。")
 
 
 # ------------------------------- 入口 -------------------------------
@@ -471,10 +649,9 @@ def main():
                     help="发布时间窗口(小时),默认 24")
     ap.add_argument("--top", type=int, default=5, help="Top N,默认 5")
     ap.add_argument("--table", type=int, default=20, help="完整榜单条数,默认 20")
-    ap.add_argument("--depth", type=int, default=60, help="每个关键词搜索条数,默认 60")
-    ap.add_argument("--enrich", type=int, default=40, help="补全精确数据的条数,默认 40")
     ap.add_argument("--out-dir", default="reports", help="输出目录")
-    ap.add_argument("--selftest", action="store_true", help="用样例数据自检渲染,不联网")
+    ap.add_argument("--selftest", action="store_true",
+                    help="用伪造的搜索结果页自检解析+渲染,不联网")
     args = ap.parse_args()
 
     if args.selftest:
@@ -482,8 +659,8 @@ def main():
         return
 
     cfg = {
-        "keywords": args.keywords, "window": args.window, "top": args.top,
-        "table": args.table, "depth": args.depth, "enrich": args.enrich,
+        "keywords": args.keywords, "window": args.window,
+        "top": args.top, "table": args.table,
     }
     # 用北京时间做报告日期,更符合使用习惯
     generated_at = datetime.now(timezone(timedelta(hours=8)))

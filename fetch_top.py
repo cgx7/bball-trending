@@ -127,9 +127,34 @@ def _risk_of(channel):
     return "低", "非官方频道,仍需确认原始素材来源"
 
 
+# ------------------------------- 诊断收集 -------------------------------
+# GitHub Actions 的日志在网页上,排查时够不着。这里把关键信息攒起来写进
+# 报告文件,报告会提交回仓库 —— 这样 git pull 就能看到失败原因,
+# 不需要开网页、不需要 API、不需要截图。
+
+DIAG = []
+
+
+def diag(msg):
+    """记录一条诊断信息(同时进日志和报告)。"""
+    log.warning("[诊断] %s", msg)
+    DIAG.append(str(msg))
+
+
+# YouTube 对数据中心 IP(GitHub Actions 就是)有反爬。不同 player client
+# 走的接口不一样,一个被挡换下一个。默认排最前,其余作为退路依次尝试。
+CLIENT_VARIANTS = [
+    None,
+    "youtube:player_client=web_safari",
+    "youtube:player_client=tv_embedded",
+    "youtube:player_client=mweb",
+    "youtube:player_client=android",
+]
+
+
 # ------------------------------- 采集核心 -------------------------------
 
-def _ytdlp_jsonlines(extra_args, timeout=420):
+def _ytdlp_jsonlines(extra_args, timeout=420, quiet=False):
     """跑一次 yt-dlp,把逐行 JSON 解析成 dict 列表。失败返回空列表。"""
     cmd = [
         sys.executable, "-m", "yt_dlp",
@@ -143,10 +168,12 @@ def _ytdlp_jsonlines(extra_args, timeout=420):
             errors="replace", timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        log.warning("yt-dlp 超时(%ss),跳过: %s", timeout, " ".join(extra_args[:2]))
+        diag(f"yt-dlp 超时({timeout}s): {' '.join(extra_args[:2])}")
         return []
     if proc.returncode != 0 and not proc.stdout.strip():
-        log.warning("yt-dlp 失败: %s", (proc.stderr or "").strip()[-300:])
+        err = (proc.stderr or "").strip()
+        if not quiet:
+            diag(f"yt-dlp 失败 rc={proc.returncode}: {err[-400:]}")
         return []
 
     out = []
@@ -162,20 +189,43 @@ def _ytdlp_jsonlines(extra_args, timeout=420):
 
 
 def search_keyword(keyword, depth):
-    """扁平搜索一个关键词,拿基础字段。一次请求,快。"""
-    items = _ytdlp_jsonlines(["--flat-playlist", f"ytsearch{depth}:{keyword}"])
-    log.info("  关键词 %-28s → %d 条", keyword, len(items))
-    return items
+    """扁平搜索一个关键词。依次尝试各个 player client,直到有一个返回结果。
+
+    为什么要循环试:YouTube 对数据中心 IP 会返回「确认你不是机器人」页面,
+    而不同 client 走的后端接口不同,往往只有部分被挡。
+    """
+    for variant in CLIENT_VARIANTS:
+        args = ["--flat-playlist"]
+        if variant:
+            args += ["--extractor-args", variant]
+        args.append(f"ytsearch{depth}:{keyword}")
+
+        items = _ytdlp_jsonlines(args, quiet=(variant is not None))
+        if items:
+            if variant:
+                diag(f"关键词「{keyword}」用 {variant} 才成功(默认 client 被挡)")
+            log.info("  关键词 %-28s → %d 条", keyword, len(items))
+            return items
+    diag(f"关键词「{keyword}」在所有 client 下都返回空")
+    return []
 
 
 def enrich(video_id):
     """补全单条视频的精确元数据(播放量/发布时间/时长)。"""
-    items = _ytdlp_jsonlines([f"https://www.youtube.com/watch?v={video_id}"], timeout=120)
-    return items[0] if items else None
+    for variant in CLIENT_VARIANTS:
+        args = []
+        if variant:
+            args += ["--extractor-args", variant]
+        args.append(f"https://www.youtube.com/watch?v={video_id}")
+        items = _ytdlp_jsonlines(args, timeout=120, quiet=(variant is not None))
+        if items:
+            return items[0]
+    return None
 
 
 def collect(cfg):
     """主流程:多关键词搜索 → 去重 → 补全 → 时间窗过滤 → 按播放量排序。"""
+    DIAG.clear()
     # 1. 多关键词并行搜索
     log.info("搜索 %d 个关键词,每个取 %d 条 …", len(cfg["keywords"]), cfg["depth"])
     raw = []
@@ -183,6 +233,7 @@ def collect(cfg):
         futs = {ex.submit(search_keyword, kw, cfg["depth"]): kw for kw in cfg["keywords"]}
         for f in as_completed(futs):
             raw.extend(f.result())
+    diag(f"阶段1 搜索:原始 {len(raw)} 条")
 
     # 2. 按 video id 去重,顺手做一次播放量粗排
     seen, candidates = set(), []
@@ -196,6 +247,7 @@ def collect(cfg):
             continue
         candidates.append(it)
     log.info("去重后 %d 条候选", len(candidates))
+    diag(f"阶段2 去重去噪后:{len(candidates)} 条")
 
     # 3. 扁平搜索的播放量/时间不可靠,对头部候选补全精确元数据
     candidates.sort(key=lambda x: _parse_count(x.get("view_count")) or 0, reverse=True)
@@ -210,6 +262,7 @@ def collect(cfg):
             if d:
                 detailed.append(d)
     log.info("补全成功 %d 条", len(detailed))
+    diag(f"阶段3 补全精确数据:{len(detailed)}/{len(head)} 条")
 
     # 4. 发布时间窗口过滤
     now = datetime.now(timezone.utc)
@@ -236,6 +289,7 @@ def collect(cfg):
         kept.append(d)
 
     log.info("时间窗内(%.0f 小时)有 %d 条", cfg["window"], len(kept))
+    diag(f"阶段4 时间窗 {cfg['window']:.0f}h 内:{len(kept)} 条")
 
     # 5. 按播放量排序(用户要的是"播放量前五")
     kept.sort(key=lambda x: x["view_count"], reverse=True)
@@ -261,8 +315,22 @@ def render_markdown(rows, cfg, generated_at):
         lines += [
             "## ⚠️ 本次没有采到数据",
             "",
-            "可能原因:网络不通(本地跑需要代理)、YouTube 改版、或时间窗内确实没有新视频。",
-            "先确认 `python -m yt_dlp --version` 能跑,再确认能访问 youtube.com。",
+            "---",
+            "",
+            "### 🔍 诊断(排查用,定位死在哪一环)",
+            "",
+            "```text",
+            *(DIAG or ["(没有诊断信息 —— 说明脚本根本没跑到采集阶段)"]),
+            "```",
+            "",
+            "**怎么读这几行:**",
+            "",
+            "| 停在哪 | 说明 |",
+            "|---|---|",
+            "| 阶段1 = 0 条 | YouTube 把 GitHub 的服务器 IP 挡了(反爬),或网络不通 |",
+            "| 阶段1 有数、阶段3 = 0 | 搜索能通但取视频详情被挡 |",
+            "| 阶段4 = 0 | 前面都正常,只是这个时间窗内确实没有新视频(放宽 `--window`) |",
+            "| 一条诊断都没有 | 脚本没执行到采集,是环境/依赖问题 |",
             "",
         ]
         return "\n".join(lines)

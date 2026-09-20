@@ -297,8 +297,18 @@ def search_page(keyword, session=None):
 
     data = _extract_json_blob(r.text, "ytInitialData")
     if data is None:
+        # 拿到页面但没数据 → 得知道 YouTube 到底吐了什么,不然下一轮还是瞎猜。
+        low = r.text.lower()
+        hits = [desc for kw, desc in (
+            ("consent", "同意页"), ("captcha", "验证码页"), ("not a robot", "机器人验证"),
+            ("unusual traffic", "异常流量拦截"), ("sign in", "登录墙"),
+            ("enable javascript", "JS 强制页"), ("error", "错误页"),
+        ) if kw in low]
+        m = re.search(r"<title[^>]*>(.*?)</title>", r.text, re.S | re.I)
+        title = (m.group(1).strip()[:80] if m else "无 <title>")
         diag(f"关键词「{keyword}」:页面里找不到 ytInitialData"
-             f"(HTML 长度 {len(r.text)},多半是被反爬挡了或官方改版)")
+             f"(HTTP {r.status_code},{len(r.text)} 字节,标题「{title}」)"
+             + (f" 命中特征:{'/'.join(hits)}" if hits else " 无已知拦截特征"))
         return []
 
     renderers = []

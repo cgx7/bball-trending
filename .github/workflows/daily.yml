@@ -1,0 +1,57 @@
+name: 🏀 每日篮球热榜
+
+# 定时说明(重点):
+# NBA 比赛是美国当地晚上打的,换算成 UTC 大约是 23:00 到 06:00。
+# 所以跑太早会漏掉当天所有比赛。这里卡两个点:
+#   13 0 * * * → 北京时间 08:13,抓前半夜结束的比赛
+#   13 8 * * * → 北京时间 16:13,此时美东整晚的比赛(含西部)已全部打完
+# 刻意避开整点:GitHub 的定时任务在整点高峰期会排队延迟。
+on:
+  schedule:
+    - cron: '13 0 * * *'
+    - cron: '13 8 * * *'
+  workflow_dispatch:        # 也支持在网页上手动点一下就跑
+
+permissions:
+  contents: write           # 需要写权限才能把榜单提交回仓库
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: 拉取仓库
+        uses: actions/checkout@v4
+
+      - name: 准备 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 采集榜单
+        run: python fetch_top.py --top 5 --table 20
+
+      - name: 提交榜单回仓库
+        run: |
+          git config user.name  "bball-bot"
+          git config user.email "bball-bot@users.noreply.github.com"
+          git add reports/
+          if git diff --staged --quiet; then
+            echo "榜单没有变化,跳过提交"
+          else
+            git commit -m "🏀 篮球热榜 $(date -u +%Y-%m-%d) $(date -u +%H:%M)UTC"
+            git push
+          fi
+
+      - name: 把榜单作为 Artifact 存一份
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bball-report-${{ github.run_number }}
+          path: reports/
+          retention-days: 7

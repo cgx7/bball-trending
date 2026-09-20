@@ -1,0 +1,12 @@
+# 下载的视频不进仓库(体积大,且用 Artifact 传递)
+downloads/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 榜单本身要进仓库(daily.yml 会自动提交),所以不忽略 reports/
+# 但本地临时产物忽略掉
+reports/*.tmp

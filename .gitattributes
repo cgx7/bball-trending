@@ -1,0 +1,8 @@
+# 仓库统一用 LF 存储。Actions 跑在 Linux 上,Windows 本地的 CRLF
+# 如果被带进仓库,shell 脚本和 YAML 会出现难查的怪问题。
+* text=auto eol=lf
+
+# 二进制文件不要动
+*.png binary
+*.jpg binary
+*.mp4 binary

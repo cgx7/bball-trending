@@ -1,0 +1,80 @@
+name: ⬇️ 下载榜单视频
+
+# 这是"手动触发"的任务,不会自动跑。
+# 为什么要放云端下载:你本地网络连不上 YouTube,只有 GitHub 的海外服务器能拿到片子。
+#
+# 体积提醒:GitHub 免费账号只有 500MB Artifact 存储。
+#   - 3 条 720p 大约 150~300MB,是安全区间
+#   - 5 条 1080p 可能超过 500MB,会失败
+# 所以默认:3 条 + 720p + 只保留 1 天。要更多就分几次下。
+on:
+  workflow_dispatch:
+    inputs:
+      ranks:
+        description: '下载第几名(空格分隔)'
+        required: false
+        default: '1 2 3'
+      max_height:
+        description: '画质上限(720 省体积 / 1080 高清)'
+        required: false
+        default: '720'
+        type: choice
+        options: ['720', '1080']
+
+permissions:
+  contents: read
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 拉取仓库
+        uses: actions/checkout@v4
+
+      - name: 准备 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 检查榜单存在
+        run: |
+          if [ ! -f reports/latest.json ]; then
+            echo "::error::reports/latest.json 不存在,先跑一次「每日篮球热榜」"
+            exit 1
+          fi
+          echo "榜单生成于:$(python -c "import json;print(json.load(open('reports/latest.json'))['generated_at'])")"
+
+      - name: 下载视频
+        run: |
+          python download.py \
+            --from-json reports/latest.json \
+            --ranks ${{ github.event.inputs.ranks || '1 2 3' }} \
+            --max-height ${{ github.event.inputs.max_height || '720' }} \
+            --format mp4 \
+            --out downloads
+
+      - name: 列出产出
+        if: always()
+        run: |
+          echo "### 下载结果" >> $GITHUB_STEP_SUMMARY
+          if [ -d downloads ]; then
+            find downloads -type f -size +1M -printf '%s\t%p\n' | sort -rn | \
+              awk -F'\t' '{printf "- %.1f MB — %s\n", $1/1048576, $2}' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "没有任何文件产出" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: 打包上传(回本地从这里下)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bball-videos
+          path: downloads/
+          retention-days: 1          # 只留 1 天,避免撑爆免费的 500MB 额度
+          if-no-files-found: warn

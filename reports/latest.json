@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-20T20:16:18.758408+08:00",
+  "generated_at": "2026-09-21T08:29:16.230272+08:00",
   "window_hours": 24,
   "keywords": [
     "basketball highlights",
@@ -12,5 +12,62 @@
     "basketball shorts"
   ],
   "source": "youtube",
-  "top": []
+  "top": [
+    {
+      "rank": 1,
+      "id": "fFJI-fsYzTE",
+      "title": "These Haliburton Highlights Will Get You HYPED for His Return! 👀🔥",
+      "channel": "NBA",
+      "url": "https://youtu.be/fFJI-fsYzTE",
+      "view_count": 29424,
+      "views_per_hour": 3269,
+      "duration": "15:30",
+      "published": "2026-09-20T23:29:16.230272+08:00",
+      "age_hours": 9,
+      "thumbnail": "https://i.ytimg.com/vi/fFJI-fsYzTE/hqdefault.jpg",
+      "risk": "高"
+    },
+    {
+      "rank": 2,
+      "id": "RZO6R5StV2I",
+      "title": "The Most Underrated Plays of 2026 You Never Saw Because They Came From Role Players",
+      "channel": "Golden Hoops",
+      "url": "https://youtu.be/RZO6R5StV2I",
+      "view_count": 13199,
+      "views_per_hour": 1319,
+      "duration": "17:48",
+      "published": "2026-09-20T22:29:16.230272+08:00",
+      "age_hours": 10,
+      "thumbnail": "https://i.ytimg.com/vi/RZO6R5StV2I/hqdefault.jpg",
+      "risk": "低"
+    },
+    {
+      "rank": 3,
+      "id": "eXLdgdvZ4TY",
+      "title": "NBL Mini: New Zealand Breakers vs. Illawarra Hawks | Extended Highlights",
+      "channel": "ESPN Australia",
+      "url": "https://youtu.be/eXLdgdvZ4TY",
+      "view_count": 6449,
+      "views_per_hour": 379,
+      "duration": "7:30",
+      "published": "2026-09-20T15:29:16.230272+08:00",
+      "age_hours": 17,
+      "thumbnail": "https://i.ytimg.com/vi/eXLdgdvZ4TY/hqdefault.jpg",
+      "risk": "高"
+    },
+    {
+      "rank": 4,
+      "id": "6nkRciuL7vs",
+      "title": "NBL Mini: Sydney Kings vs. Cairns Taipans | Extended Highlights",
+      "channel": "ESPN Australia",
+      "url": "https://youtu.be/6nkRciuL7vs",
+      "view_count": 4812,
+      "views_per_hour": 343,
+      "duration": "7:28",
+      "published": "2026-09-20T18:29:16.230272+08:00",
+      "age_hours": 14,
+      "thumbnail": "https://i.ytimg.com/vi/6nkRciuL7vs/hqdefault.jpg",
+      "risk": "高"
+    }
+  ]
 }

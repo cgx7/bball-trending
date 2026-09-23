@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-23T08:27:00.751109+08:00",
+  "generated_at": "2026-09-23T16:26:35.980361+08:00",
   "window_hours": 24,
   "keywords": [
     "basketball highlights",
@@ -15,17 +15,73 @@
   "top": [
     {
       "rank": 1,
-      "id": "Cazz5y4tbg8",
-      "title": "Atlanta Dream vs. New York Liberty | FULL GAME HIGHLIGHTS | September 21, 2026",
-      "channel": "WNBA",
-      "url": "https://youtu.be/Cazz5y4tbg8",
-      "view_count": 75656,
-      "views_per_hour": 3981,
-      "duration": "10:32",
-      "published": "2026-09-22T13:27:00.751109+08:00",
-      "age_hours": 19,
-      "thumbnail": "https://i.ytimg.com/vi/Cazz5y4tbg8/hqdefault.jpg",
-      "risk": "低"
+      "id": "X7PZQg28T4M",
+      "title": "Kawhi Leonard signs extension with Raptors 👀 Shams breaks down the deal | NBA Today",
+      "channel": "NBA on ESPN",
+      "url": "https://youtu.be/X7PZQg28T4M",
+      "view_count": 178514,
+      "views_per_hour": 14876,
+      "duration": "5:51",
+      "published": "2026-09-23T04:26:35.980361+08:00",
+      "age_hours": 12,
+      "thumbnail": "https://i.ytimg.com/vi/X7PZQg28T4M/hqdefault.jpg",
+      "risk": "高"
+    },
+    {
+      "rank": 2,
+      "id": "IgLUTcMT1CY",
+      "title": "Jalen Duren and Pistons still have NO DEAL 😳 Will he stay in Detroit? 🤔 | NBA Today",
+      "channel": "NBA on ESPN",
+      "url": "https://youtu.be/IgLUTcMT1CY",
+      "view_count": 108178,
+      "views_per_hour": 4507,
+      "duration": "5:55",
+      "published": "2026-09-22T16:26:35.980361+08:00",
+      "age_hours": 24,
+      "thumbnail": "https://i.ytimg.com/vi/IgLUTcMT1CY/hqdefault.jpg",
+      "risk": "高"
+    },
+    {
+      "rank": 3,
+      "id": "vZEmUwVj2Es",
+      "title": "Who will make the 2028 Team USA Olympic team? 🇺🇸 | NBA Today",
+      "channel": "NBA on ESPN",
+      "url": "https://youtu.be/vZEmUwVj2Es",
+      "view_count": 85098,
+      "views_per_hour": 3545,
+      "duration": "4:13",
+      "published": "2026-09-22T16:26:35.980361+08:00",
+      "age_hours": 24,
+      "thumbnail": "https://i.ytimg.com/vi/vZEmUwVj2Es/hqdefault.jpg",
+      "risk": "高"
+    },
+    {
+      "rank": 4,
+      "id": "tSH4QBXKZcU",
+      "title": "How Fred VanVleet changes the Rockets' trajectory + Mavs 2026-27 outlook 👀 | NBA Today",
+      "channel": "NBA on ESPN",
+      "url": "https://youtu.be/tSH4QBXKZcU",
+      "view_count": 70977,
+      "views_per_hour": 2957,
+      "duration": "8:06",
+      "published": "2026-09-22T16:26:35.980361+08:00",
+      "age_hours": 24,
+      "thumbnail": "https://i.ytimg.com/vi/tSH4QBXKZcU/hqdefault.jpg",
+      "risk": "高"
+    },
+    {
+      "rank": 5,
+      "id": "nDY3BUlyspY",
+      "title": "NBA Rank is back 🍿 Which rookie will make the biggest impact this season? | NBA Today",
+      "channel": "ESPN",
+      "url": "https://youtu.be/nDY3BUlyspY",
+      "view_count": 67447,
+      "views_per_hour": 6131,
+      "duration": "10:17",
+      "published": "2026-09-23T05:26:35.980361+08:00",
+      "age_hours": 11,
+      "thumbnail": "https://i.ytimg.com/vi/nDY3BUlyspY/hqdefault.jpg",
+      "risk": "高"
     }
   ]
 }
